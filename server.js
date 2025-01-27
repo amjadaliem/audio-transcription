@@ -9,22 +9,36 @@ dotenv.config();
 
 const app = express();
 const port = 3001;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // Increase payload size limit to 50MB
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://audio-transcription-amjadaliem.vercel.app',
+    'https://audio-transcription-git-main-amjadaliem.vercel.app',
+    'https://audio-transcription-*.vercel.app'
+  ],
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(async () => {
-    console.log('Connected to MongoDB');
-    
-    // Log the number of transcriptions
-    const count = await Transcription.countDocuments({ documentType: 'transcription' });
-    console.log(`Found ${count} existing transcriptions`);
-  })
-  .catch(err => console.error('MongoDB connection error:', err));
+// Add health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Update MongoDB connection
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/transcriptions';
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch(err => console.error('MongoDB connection error:', err));
 
 app.post('/api/youtube/transcribe', async (req, res) => {
   try {
@@ -82,7 +96,7 @@ app.post('/api/youtube/transcribe', async (req, res) => {
     // Send to Gemini for formatting
     console.log('Sending to Gemini for formatting...');
     const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=AIzaSyCO5VieNatnPYYqK-0XJ7eUOYsgxmDCTtg',
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -229,6 +243,8 @@ app.post('/api/transcriptions', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+// Update port configuration
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is running at http://localhost:${PORT}`);
 }); 
