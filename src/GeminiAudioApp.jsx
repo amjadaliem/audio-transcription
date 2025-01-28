@@ -4,9 +4,170 @@ import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Mic, Loader2, Upload, Circle, AlertCircle, Wand2, Youtube, Settings, Copy, Share2, Save, Languages, Play, Pause, X, Volume2 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 
-const API_KEY = 'AIzaSyCO5VieNatnPYYqK-0XJ7eUOYsgxmDCTtg';
+const GeminiAudioApp = () => {
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 const CORS_PROXY = 'https://corsproxy.io/';
+
+  // State declarations
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [response, setResponse] = useState('');
+  const [summary, setSummary] = useState('');
+  const [keyTakeaways, setKeyTakeaways] = useState('');
+  const [resources, setResources] = useState('');
+  const [audioFile, setAudioFile] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [showStopDialog, setShowStopDialog] = useState(false);
+  const [showRetryDialog, setShowRetryDialog] = useState(false);
+  const [retryData, setRetryData] = useState(null);
+  const [savingError, setSavingError] = useState(null);
+  const [saveStatus, setSaveStatus] = useState('');
+  const [smoothProgress, setSmoothProgress] = useState(0);
+  const [activeTab, setActiveTab] = useState('upload');
+  const [activeResultTab, setActiveResultTab] = useState('transcription');
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [selectedDevice, setSelectedDevice] = useState('');
+  const [audioDevices, setAudioDevices] = useState([]);
+
+  // Refs
+  const mediaRecorderRef = useRef(null);
+  const audioRef = useRef(null);
+
+// Add configuration constants
+const genAI = new GoogleGenerativeAI(API_KEY);
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-2.0-flash-exp",
+    systemInstruction: `Transcribe audio content of the recording you are given accurately while following these rules:
+Ensure accurate representation of the original audio while maintaining clarity and readability. add punctuation and proper spacing based on the voice. format using full stop, coma, question mark and paragraph  `,
+});
+
+const generationConfig = {
+  maxOutputTokens: 8192,
+  responseMimeType: "text/plain",
+};
+
+  // Add the missing analysis functions
+  const getSummary = async (text) => {
+    try {
+      const chatSession = model.startChat({
+        generationConfig: {
+          maxOutputTokens: 8192,
+          temperature: 0.1,
+        }
+      });
+
+      const result = await chatSession.sendMessage(
+        `Please provide a concise summary of the following text in same language as the text. Focus on the main points and key ideas:\n\n${text}`
+      );
+      return result.response.text();
+    } catch (error) {
+      console.error('Error generating summary:', error);
+      throw new Error('Failed to generate summary');
+    }
+  };
+
+  const getKeyTakeaways = async (text) => {
+    try {
+      const chatSession = model.startChat({
+        generationConfig: {
+          maxOutputTokens: 8192,
+          temperature: 0.1,
+        }
+      });
+
+      const result = await chatSession.sendMessage(
+        `Please analyze the following text and extract 3-5 key takeaways. For each takeaway:
+        1. Start with a numbered heading in same language as the text (e.g., "1. Main Point")
+        2. Follow with a detailed explanation in same language as the text
+        3. End with relevant hashtags in english
+        4. Minimum 5-10 takeaways
+        
+        Format each takeaway as:
+        1. [Heading]
+        [Detailed explanation]
+        #hashtag1 #hashtag2
+
+        Here's the text to analyze:
+        ${text}`
+      );
+      
+      const takeawaysText = result.response.text();
+      console.log('Key Takeaways Response:', takeawaysText); // Debug log
+      return takeawaysText;
+    } catch (error) {
+      console.error('Error generating key takeaways:', error);
+      throw new Error('Failed to generate key takeaways');
+    }
+  };
+
+  const getResources = async (text) => {
+    try {
+      const chatSession = model.startChat({
+        generationConfig: {
+          maxOutputTokens: 8192,
+          temperature: 0.7, // Increased for more creative resource suggestions
+        }
+      });
+
+      const prompt = `Based on the following transcription, create a comprehensive resource list mentioned in the transcription  
+
+Instructions:
+1. Analyze the content deeply for topics, concepts, and themes
+2. Keep descriptions and resources in the same language as the transcription
+
+Format each resource category as follows:
+
+Resource Type: [Category Name]
+1. [Resource Title]
+   Description: [Clear explanation of relevance]
+   
+  
+
+Required Categories (if relevant to content):
+- Books & Literature
+- Online Learning Resources
+- Tools & Applications
+- Websites & Platforms
+- Research & Articles
+- Expert Sources
+- Related Topics & Courses
+
+Example format:
+Resource Type: Books & Literature
+1. [Book Title]
+   Description: Comprehensive guide covering [relevant topic from transcription]
+  
+  
+
+Transcription to analyze:
+${text}
+
+Note: Focus on quality over quantity.`;
+
+      console.log('Sending resource generation prompt...'); // Debug log
+      const result = await chatSession.sendMessage(prompt);
+      const response = result.response.text();
+      console.log('Resource generation response:', response); // Debug log
+      
+      // Validate response format
+      if (!response.includes('Resource Type:')) {
+        // If no structured resources found, generate topic-based resources
+        const fallbackPrompt = `For the following content, please suggest at least 3 learning resources related to the main topics discussed:
+        ${text.substring(0, 1000)}... // Send first 1000 chars for topic extraction`;
+        
+        const fallbackResult = await chatSession.sendMessage(fallbackPrompt);
+        return fallbackResult.response.text();
+      }
+
+      return response;
+    } catch (error) {
+      console.error('Error generating resources:', error);
+      throw new Error('Failed to generate resources');
+    }
+  };
 
 // Utility function to ensure YouTube API is loaded
 const ensureYouTubeApiLoaded = () => {
@@ -28,170 +189,182 @@ const AudioPlayer = ({ file }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const audioRef = useRef(null);
-  const [audioUrl, setAudioUrl] = useState(null);
-  const [isDragging, setIsDragging] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+    const playerRef = useRef(null);
 
   useEffect(() => {
-    // Create object URL when file changes
-    if (file) {
+      if (file && playerRef.current) {
+      const loadAudio = async () => {
+        try {
       const url = URL.createObjectURL(file);
-      setAudioUrl(url);
-      
-      // Reset state
-      setCurrentTime(0);
-      setDuration(0);
-      setIsPlaying(false);
-      
-      // Cleanup old URL when component unmounts or file changes
+          
+          // Create AudioContext to get accurate duration
+          const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const arrayBuffer = await file.arrayBuffer();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          setDuration(audioBuffer.duration);
+          
+            if (playerRef.current) {
+              playerRef.current.src = url;
+              await playerRef.current.load();
+            }
+
+          setIsLoading(false);
+          audioContext.close();
+          
       return () => {
-        URL.revokeObjectURL(url);
+            URL.revokeObjectURL(url);
+          };
+        } catch (error) {
+          console.error('Error loading audio:', error);
+          setIsLoading(false);
+        }
       };
+
+      loadAudio();
     }
   }, [file]);
 
   useEffect(() => {
-    if (audioRef.current) {
-      const audio = audioRef.current;
+      if (playerRef.current) {
+        const audio = playerRef.current;
       
       const handleTimeUpdate = () => {
-        if (!isDragging && isFinite(audio.currentTime)) {
-          setCurrentTime(audio.currentTime);
-        }
+        setCurrentTime(audio.currentTime || 0);
       };
 
       const handleLoadedMetadata = () => {
-        if (isFinite(audio.duration)) {
-          setDuration(audio.duration);
+        const audioDuration = audio.duration;
+        if (isFinite(audioDuration) && !isNaN(audioDuration)) {
+          setDuration(audioDuration);
         } else {
           setDuration(0);
         }
+        setIsLoading(false);
       };
 
-      const handleLoadedData = () => {
-        if (isFinite(audio.duration)) {
-          setDuration(audio.duration);
-        }
-      };
-
-      const handleEnded = () => {
-        setIsPlaying(false);
-        setCurrentTime(0);
-      };
-
+      const handleEnded = () => setIsPlaying(false);
       const handlePause = () => setIsPlaying(false);
       const handlePlay = () => setIsPlaying(true);
+      const handleError = () => {
+        console.error('Audio loading error');
+        setIsLoading(false);
+        setDuration(0);
+      };
 
       audio.addEventListener('timeupdate', handleTimeUpdate);
       audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.addEventListener('loadeddata', handleLoadedData);
       audio.addEventListener('ended', handleEnded);
       audio.addEventListener('pause', handlePause);
       audio.addEventListener('play', handlePlay);
-
-      // Try to load duration immediately if already available
-      if (audio.readyState >= 1 && isFinite(audio.duration)) {
-        setDuration(audio.duration);
-      }
+      audio.addEventListener('error', handleError);
 
       return () => {
         audio.removeEventListener('timeupdate', handleTimeUpdate);
         audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.removeEventListener('loadeddata', handleLoadedData);
         audio.removeEventListener('ended', handleEnded);
         audio.removeEventListener('pause', handlePause);
         audio.removeEventListener('play', handlePlay);
+        audio.removeEventListener('error', handleError);
       };
     }
-  }, [audioRef.current, isDragging]);
-
-  const togglePlayPause = () => {
-    if (audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-      } else {
-        audioRef.current.play().catch(e => {
-          console.error('Playback failed:', e);
-          setIsPlaying(false);
-        });
-      }
-    }
-  };
+    }, [playerRef.current]);
 
   const handleSeek = (e) => {
     const progressBar = e.currentTarget;
     const rect = progressBar.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percentage = Math.min(Math.max(x / rect.width, 0), 1);
-    const time = percentage * duration;
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const percentage = x / rect.width;
     
-    if (audioRef.current && !isNaN(time) && isFinite(time) && time >= 0 && time <= duration) {
-      audioRef.current.currentTime = time;
-      setCurrentTime(time);
+    // Ensure we have valid duration
+    if (!duration || duration <= 0) return;
+    
+    // Calculate new time with better precision
+    const newTime = Math.max(0, Math.min(percentage * duration, duration));
+    
+      if (playerRef.current) {
+      try {
+          playerRef.current.currentTime = newTime;
+        setCurrentTime(newTime);
+      } catch (error) {
+        console.error('Error seeking:', error);
+      }
     }
   };
 
-  const handleDrag = (e) => {
-    if (isDragging && audioRef.current) {
-      handleSeek(e);
-    }
-  };
-
-  const handleDragStart = () => {
-    setIsDragging(true);
-  };
-
-  const handleDragEnd = () => {
-    setIsDragging(false);
+  // Add click handler for more precise seeking
+  const handleProgressClick = (e) => {
+    if (isLoading || !duration) return;
+    handleSeek(e);
   };
 
   const formatTime = (time) => {
     if (!isFinite(time) || isNaN(time)) return '0:00';
     const minutes = Math.floor(time / 60);
     const seconds = Math.floor(time % 60);
+    const milliseconds = Math.floor((time % 1) * 100);
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  if (!audioUrl) return null;
+  if (!file) return null;
 
   return (
     <div className="bg-gray-50 rounded-lg p-4">
       <div className="flex items-center gap-4">
         <button
-          onClick={togglePlayPause}
-          className="w-10 h-10 flex items-center justify-center bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-colors"
+          onClick={() => {
+              if (playerRef.current) {
+              if (isPlaying) {
+                  playerRef.current.pause();
+              } else {
+                  playerRef.current.play().catch(e => {
+                  console.error('Playback failed:', e);
+                  setIsPlaying(false);
+                });
+              }
+            }
+          }}
+          disabled={isLoading}
+          className={`w-10 h-10 flex items-center justify-center ${
+            isLoading ? 'bg-gray-400' : 'bg-indigo-600 hover:bg-indigo-700'
+          } text-white rounded-full transition-colors`}
         >
-          {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-1" />}
+          {isLoading ? (
+            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          ) : isPlaying ? (
+            <Pause className="w-5 h-5" />
+          ) : (
+            <Play className="w-5 h-5 ml-1" />
+          )}
         </button>
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm text-gray-500">{formatTime(currentTime)}</span>
+            <span className="text-sm text-gray-500 min-w-[40px]">{formatTime(currentTime)}</span>
             <div 
               className="flex-1 relative h-2 bg-gray-200 rounded cursor-pointer group"
-              onClick={handleSeek}
-              onMouseDown={handleDragStart}
-              onMouseMove={handleDrag}
-              onMouseUp={handleDragEnd}
-              onMouseLeave={handleDragEnd}
+              onClick={handleProgressClick}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={duration ? (currentTime / duration) * 100 : 0}
             >
               <div 
                 className="absolute h-full bg-indigo-600 rounded"
-                style={{ 
-                  width: `${(duration && isFinite(duration) && duration > 0) ? 
-                    Math.min((currentTime / duration) * 100, 100) : 0}%` 
-                }}
+                style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }}
               />
+              {!isLoading && (
               <div 
                 className="absolute h-4 w-4 bg-indigo-600 rounded-full -top-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 style={{ 
-                  left: `${(duration && isFinite(duration) && duration > 0) ? 
-                    Math.min((currentTime / duration) * 100, 100) : 0}%`,
+                  left: `${duration ? (currentTime / duration) * 100 : 0}%`, 
                   transform: 'translateX(-50%)',
                   pointerEvents: 'none'
                 }}
               />
+              )}
             </div>
-            <span className="text-sm text-gray-500">{formatTime(duration || 0)}</span>
+            <span className="text-sm text-gray-500 min-w-[40px]">{formatTime(duration)}</span>
           </div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -203,584 +376,340 @@ const AudioPlayer = ({ file }) => {
         </div>
       </div>
       <audio 
-        ref={audioRef}
-        src={audioUrl}
+          ref={playerRef}
         preload="metadata"
       />
     </div>
   );
 };
 
-const GeminiAudioApp = () => {
-  const [audioFile, setAudioFile] = useState(null);
-  const [response, setResponse] = useState('');
-  const [summary, setSummary] = useState('');
-  const [keyTakeaways, setKeyTakeaways] = useState('');
-  const [resources, setResources] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [error, setError] = useState('');
-  const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [audioDevices, setAudioDevices] = useState([]);
-  const [selectedDevice, setSelectedDevice] = useState(null);
-  const [activeResultTab, setActiveResultTab] = useState('transcription');
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [processingProgress, setProcessingProgress] = useState(0);
-  const [smoothProgress, setSmoothProgress] = useState(0);
-  const [copyStatus, setCopyStatus] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState('');
-  const [activeTab, setActiveTab] = useState('upload');
-  const [showYoutubeInput, setShowYoutubeInput] = useState(false);
+// Add the saveToMongoDB function
+const saveToMongoDB = async (data) => {
+  try {
+    // Validate data before sending
+    if (!data) throw new Error('No data provided for saving');
 
-  // Load YouTube IFrame API and get audio devices
-  useEffect(() => {
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    const firstScriptTag = document.getElementsByTagName('script')[0];
-    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-    // Get available audio devices
-    const getAudioDevices = async () => {
+    // Format resources properly
+    let formattedResources = [];
+    if (typeof data.resources === 'string') {
+      // If resources is a string, try to parse it
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(device => device.kind === 'audioinput');
-        setAudioDevices(audioInputs);
-        if (audioInputs.length > 0) {
-          setSelectedDevice(audioInputs[0].deviceId);
-        }
-      } catch (error) {
-        console.error('Error getting audio devices:', error);
-        setError('Error accessing audio devices: ' + error.message);
+        const resourceTypes = data.resources.split('Resource Type:').filter(Boolean);
+        formattedResources = resourceTypes.map(section => {
+          const lines = section.trim().split('\n').filter(Boolean);
+          const type = lines[0].trim();
+          const resources = [];
+          let currentResource = {};
+          
+          for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.match(/^\d+\./)) {
+              if (Object.keys(currentResource).length > 0) {
+                resources.push(currentResource);
+              }
+              currentResource = {
+                title: line.replace(/^\d+\./, '').trim(),
+                description: '',
+                link: '',
+                hashtags: []
+              };
+            } else if (line.startsWith('http') || line.includes('www.')) {
+              currentResource.link = line;
+            } else if (line.startsWith('#')) {
+              currentResource.hashtags = line.split(' ');
+            } else if (currentResource.title) {
+              currentResource.description = line;
+            }
+          }
+          if (Object.keys(currentResource).length > 0) {
+            resources.push(currentResource);
+          }
+          
+          return {
+            type,
+            resources
+          };
+        });
+      } catch (e) {
+        console.error('Error parsing resources:', e);
+        formattedResources = [{ type: 'general', resources: [{ title: data.resources }] }];
+      }
+    } else if (Array.isArray(data.resources)) {
+      formattedResources = data.resources;
+    }
+
+    // Format key takeaways
+    let formattedKeyTakeaways = [];
+    if (typeof data.keyTakeaways === 'string') {
+      try {
+        const takeaways = data.keyTakeaways.split(/\d+\./).filter(Boolean);
+        formattedKeyTakeaways = takeaways.map((takeaway, index) => {
+          const lines = takeaway.trim().split('\n').filter(Boolean);
+          return {
+            number: index + 1,
+            heading: lines[0] || '',
+            content: lines[1] || '',
+            hashtags: lines[2] ? lines[2].split(' ') : []
+          };
+        });
+      } catch (e) {
+        console.error('Error parsing key takeaways:', e);
+        formattedKeyTakeaways = [{ 
+          number: 1, 
+          heading: 'Key Takeaway', 
+          content: data.keyTakeaways,
+          hashtags: []
+        }];
+      }
+    }
+
+    // Format the data according to MongoDB schema
+    const formattedData = {
+      title: data.title || 'Untitled',
+      source: data.source || 'unknown',
+      sourceUrl: data.sourceUrl || data.source || '',
+      transcription: {
+        text: data.transcription || '',
+        language: 'auto-detect'
+      },
+      summary: data.summary || '',
+      keyTakeaways: formattedKeyTakeaways,
+      resources: formattedResources,
+      metadata: {
+        ...(data.metadata || {}),
+        savedAt: new Date().toISOString(),
+        duration: data.metadata?.duration || 0,
+        fileSize: data.metadata?.fileSize || 0,
+        fileType: data.metadata?.fileType || ''
       }
     };
 
-    getAudioDevices();
-  }, []);
+    // Add retry logic for network issues
+    const maxRetries = 3;
+    let lastError = null;
 
-  const getVideoId = (url) => {
-    const patterns = [
-      /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i,
-      /^[^"&?\/\s]{11}$/i
-    ];
-    
-    for (const pattern of patterns) {
-      const match = url.match(pattern);
-      if (match) return match[1];
-    }
-    return null;
-  };
-
-  // Add font style
-  const styles = `
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+Malayalam:wght@400;600;700&display=swap');
-
-    .malayalam-text {
-      font-family: 'Noto Serif Malayalam', serif;
-    }
-
-    .progress-animation {
-      animation: progress 30s linear;
-    }
-    @keyframes progress {
-      from { width: 0; }
-      to { width: 100%; }
-    }
-  `;
-
-  // Add automatic save function
-  const saveToMongoDB = async (transcriptionText, summaryText, keyTakeawaysText, resourcesText) => {
-    try {
-      const transcriptionData = {
-        title: audioFile?.name || youtubeUrl || 'Transcription',
-        source: youtubeUrl ? 'youtube' : (audioFile ? 'upload' : 'recording'),
-        sourceUrl: youtubeUrl || null,
-        transcription: {
-          text: transcriptionText,
-          languages: ['en'],
-          duration: 0
-        },
-        summary: summaryText || '',
-        keyTakeaways: parseKeyTakeaways(keyTakeawaysText).map(takeaway => ({
-          heading: takeaway.heading || '',
-          content: takeaway.content || '',
-          hashtags: takeaway.hashtags ? takeaway.hashtags.split(' ').filter(Boolean) : []
-        })),
-        resources: parseResources(resourcesText).flatMap(type => 
-          type.resources.map(resource => ({
-            type: type.type || 'other',
-            title: resource.title || '',
-            description: resource.description || '',
-            link: resource.link || '',
-            hashtags: resource.hashtags ? resource.hashtags.split(' ').filter(Boolean) : []
-          }))
-        ),
-        metadata: {
-          fileSize: audioFile?.size || 0,
-          mimeType: audioFile?.type || 'text/plain',
-          originalFilename: audioFile?.name || 'transcription',
-          processingDuration: Date.now()
-        }
-      };
-
-      const apiResponse = await fetch('http://localhost:3001/api/transcriptions', {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+    const response = await fetch('http://localhost:3001/api/transcriptions', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(transcriptionData)
-      });
+      headers: {
+        'Content-Type': 'application/json',
+      },
+          body: JSON.stringify(formattedData)
+    });
 
-      if (!apiResponse.ok) {
-        const errorData = await apiResponse.json();
-        throw new Error(errorData.error || 'Failed to save transcription');
-      }
+        if (!response.ok) {
+      const errorData = await response.text();
+          throw new Error(errorData || `Server responded with status: ${response.status}`);
+    }
 
-      console.log('Transcription saved successfully');
+        const result = await response.json();
+        console.log('Successfully saved to database:', result);
+        return result;
     } catch (error) {
-      console.error('Error saving to MongoDB:', error);
+        console.error(`Attempt ${attempt + 1} failed:`, error);
+        lastError = error;
+        
+        // If it's not the last attempt, wait before retrying
+        if (attempt < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          continue;
+        }
+          throw error;
+        }
     }
-  };
 
-  // Update handleYoutubeExtract to save automatically
-  const handleYoutubeExtract = async () => {
-    if (!youtubeUrl) return;
-    setLoading(true);
-    setError('');
-    setResponse('');
-    setSummary('');
-    setKeyTakeaways('');
-    setResources('');
+    throw lastError;
+    } catch (error) {
+    console.error('Error saving to MongoDB:', error);
+    setRetryData(data);
+    setShowRetryDialog(true);
+    throw new Error(`Failed to save to database: ${error.message}`);
+  }
+};
+
+// Add retry save function with improved error handling
+const retryDatabaseSave = async () => {
+  if (!retryData) return;
+  
+  try {
+    setSavingError(null);
+    setIsSaving(true);
     
+    // Show saving status
+    setSaveStatus('Retrying save...');
+    
+    await saveToMongoDB(retryData);
+    setRetryData(null);
+    setShowRetryDialog(false);
+    setSaveStatus('Saved successfully!');
+    setTimeout(() => setSaveStatus(''), 3000);
+    } catch (error) {
+    console.error('Retry save failed:', error);
+    setSavingError(error.message || 'Failed to save. Please try again.');
+    // Keep retry dialog open if failed
+    setShowRetryDialog(true);
+  } finally {
+    setIsSaving(false);
+  }
+};
+
+// Add function to remove duplicate lines
+const removeDuplicateLines = (text) => {
+  if (!text) return '';
+  const lines = text.split('\n');
+  const uniqueLines = [...new Set(lines)];
+  return uniqueLines.join('\n');
+};
+
+// Update handleFileRead function to use direct transcription
+  const handleFileRead = async (file) => {
     try {
-      const videoId = getVideoId(youtubeUrl);
-      if (!videoId) {
-        throw new Error('Invalid YouTube URL. Please enter a valid YouTube video URL.');
-      }
+      setLoading(true);
+      setError('');
+      setSmoothProgress(0);
+      setAudioFile(file);
+    setSavingError(null);
 
-      console.log('Extracting captions for video:', videoId);
+    // Convert file to base64
+    const base64Data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
 
-      // Call backend endpoint for caption extraction
-      const response = await fetch('http://localhost:3001/api/youtube/transcribe', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+    setSmoothProgress(20);
+
+    // Process audio using Gemini API directly
+    const chatSession = model.startChat({
+      generationConfig: {
+        maxOutputTokens: 8192,
+        temperature: 0.1,
+      },
+      history: [
+        {
+          role: "user",
+          parts: [{
+            inlineData: {
+              mimeType: file.type,
+              data: base64Data
+            }
+          }],
         },
-        body: JSON.stringify({ 
-          videoId,
-          url: youtubeUrl,
-          title: 'YouTube Video'
-        })
-      });
+      ],
+    });
 
-      const data = await response.json();
+    const result = await chatSession.sendMessage(".");
+      const transcriptionText = await result.response.text();
+      setResponse(transcriptionText);
+      setSmoothProgress(50);
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to extract captions');
-      }
+    // Process all analyses in parallel
+    const [summaryText, takeawaysText, resourcesText] = await Promise.all([
+      getSummary(transcriptionText),
+      getKeyTakeaways(transcriptionText),
+      getResources(transcriptionText)
+    ]);
 
-      console.log('Received response:', data);
-      
-      let transcriptText;
-      
-      if (data.message === 'Transcription found in database') {
-        console.log('Found existing transcription');
-        // If transcription exists, use it
-        const transcription = data.transcription;
-        if (!transcription || !transcription.transcription || !transcription.transcription.text) {
-          throw new Error('Invalid transcription data received');
-        }
-
-        transcriptText = transcription.transcription.text;
-      } else {
-        if (!data.transcription || !data.transcription.transcription || !data.transcription.transcription.text) {
-          throw new Error('Invalid response format from server');
-        }
-        transcriptText = data.transcription.transcription.text;
-      }
-
-      if (!transcriptText) {
-        throw new Error('No captions found. The video might not have captions enabled.');
-      }
-
-      console.log('Setting transcription text');
-      setResponse(transcriptText);
-      
-      // Always generate fresh analyses using Gemini
-      console.log('Generating fresh analyses with Gemini...');
-      const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
-        getSummary(transcriptText),
-        getKeyTakeaways(transcriptText),
-        getResources(transcriptText)
-      ]);
-
-      console.log('Setting analyses results');
+      console.log('Key Takeaways:', takeawaysText); // Debug log
       setSummary(summaryText);
-      setKeyTakeaways(keyTakeawaysText);
+      setSmoothProgress(70);
+      setKeyTakeaways(takeawaysText);
+      setSmoothProgress(85);
       setResources(resourcesText);
+      setSmoothProgress(95);
 
-      // Save everything to MongoDB
-      console.log('Saving to MongoDB');
-      await saveToMongoDB(transcriptText, summaryText, keyTakeawaysText, resourcesText);
-      
+      // Save to MongoDB
+    const saveData = {
+      title: file.name === 'recording.webm' ? 'Voice Recording' : file.name,
+      source: file.name === 'recording.webm' ? 'recording' : 'upload',
+        transcription: transcriptionText,
+        summary: summaryText,
+        keyTakeaways: takeawaysText,
+        resources: resourcesText,
+        metadata: {
+          duration: audioRef.current ? audioRef.current.duration : 0,
+          fileSize: file.size,
+          fileType: file.type,
+        }
+    };
+
+    try {
+      await saveToMongoDB(saveData);
+      setSmoothProgress(100);
+      setSaveStatus('Saved successfully!');
+      setTimeout(() => setSaveStatus(''), 3000);
     } catch (error) {
-      console.error('YouTube extraction error:', error);
-      setError(error.message || 'Failed to process video');
+      setSavingError('Failed to save to database. Your transcription is still available.');
+      setRetryData(saveData);
+      setShowRetryDialog(true);
+    }
+
+    } catch (error) {
+      console.error('Error processing file:', error);
+      setError(error.message || 'Failed to process file');
+    setRetryData({ file });
+    setShowRetryDialog(true);
     } finally {
       setLoading(false);
     }
   };
 
-  // Add retry logic with exponential backoff
-  const retryWithBackoff = async (fn, retries = 3, baseDelay = 1000) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        return await fn();
-      } catch (error) {
-        if (i === retries - 1) throw error;
-        await new Promise(resolve => setTimeout(resolve, baseDelay * Math.pow(2, i)));
-      }
-    }
-  };
-
-  // Update handleFileRead to save automatically
-  const handleFileRead = async (file, onUploadProgress, onProcessingProgress) => {
-    // Reset progress
-    onUploadProgress(0);
-    onProcessingProgress(0);
-    setSmoothProgress(0);
-
-    if (file.size > 20 * 1024 * 1024) {
-      // Handle large files with smaller chunks and more parallel processing
-      const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB chunks
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      let transcription = new Array(totalChunks);
-      let uploadedChunks = 0;
-      let processedChunks = 0;
-
-      // Process chunks in parallel, 4 at a time
-      const processChunkBatch = async (startIdx) => {
-        const PARALLEL_CHUNKS = 4;
-        const batchPromises = [];
-
-        for (let i = 0; i < PARALLEL_CHUNKS && startIdx + i < totalChunks; i++) {
-          const chunkIndex = startIdx + i;
-          const start = chunkIndex * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, file.size);
-          let chunkData = file.slice(start, end);
-
-          batchPromises.push((async () => {
-            try {
-              // Upload chunk with retry
-              const base64Chunk = await retryWithBackoff(async () => {
-                const result = await readChunkAsBase64(chunkData);
-                uploadedChunks++;
-                const uploadPercent = Math.floor((uploadedChunks / totalChunks) * 100);
-                onUploadProgress(uploadPercent);
-                return result;
-              });
-
-              // Process chunk with retry
-              const chunkTranscription = await retryWithBackoff(async () => {
-                const result = await processAudioChunk(base64Chunk, file.type);
-                processedChunks++;
-                const processingPercent = Math.floor((processedChunks / totalChunks) * 100);
-                onProcessingProgress(processingPercent);
-                
-                // Update smooth progress based on both upload and processing
-                const totalProgress = Math.floor(
-                  ((uploadedChunks + processedChunks) / (totalChunks * 2)) * 100
-                );
-                setSmoothProgress(totalProgress);
-                
-                return result;
-              });
-
-              transcription[chunkIndex] = chunkTranscription;
-            } finally {
-              // Clear chunk data to help GC
-              chunkData = null;
-            }
-          })());
-        }
-
-        await Promise.all(batchPromises);
-      };
-
-      // Process all chunks in batches
-      for (let i = 0; i < totalChunks; i += 4) {
-        await processChunkBatch(i);
-      }
-
-      // Ensure progress reaches 100%
-      onUploadProgress(100);
-      onProcessingProgress(100);
-      setSmoothProgress(100);
-
-      // Join chunks and clean up
-      const result = transcription.join(' ').trim();
-      transcription = null;
-
-      // Generate analyses in parallel
-      const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
-        getSummary(result),
-        getKeyTakeaways(result),
-        getResources(result)
-      ]);
-
-      // Save everything to MongoDB
-      await saveToMongoDB(result, summaryText, keyTakeawaysText, resourcesText);
-
-      return result;
-
-    } else {
-      // Handle smaller files with improved progress tracking
-      let base64Data = null;
-      try {
-        // Upload phase
-        base64Data = await retryWithBackoff(async () => {
-          const result = await readFileAsBase64(file, (progress) => {
-            onUploadProgress(progress);
-            setSmoothProgress(Math.floor(progress / 2)); // First 50%
-          });
-          return result;
-        });
-
-        onUploadProgress(100);
-        setSmoothProgress(50);
-
-        // Processing phase
-        const result = await retryWithBackoff(async () => {
-          const transcription = await processAudioFile(base64Data, file.type);
-          onProcessingProgress(100);
-          setSmoothProgress(100);
-          return transcription;
-        });
-
-        // Generate analyses in parallel
-        const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
-          getSummary(result),
-          getKeyTakeaways(result),
-          getResources(result)
-        ]);
-
-        // Save everything to MongoDB
-        await saveToMongoDB(result, summaryText, keyTakeawaysText, resourcesText);
-
-        return result;
-      } finally {
-        // Clear data to help GC
-        if (base64Data) {
-          base64Data = null;
-        }
-      }
-    }
-  };
-
-  const readChunkAsBase64 = (chunk) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result.split(',')[1];
-        reader.onload = null; // Clear handler to help GC
-        resolve(result);
-      };
-      reader.onerror = (error) => {
-        reader.onerror = null; // Clear handler
-        reject(error);
-      };
-      reader.readAsDataURL(chunk);
-    });
-  };
-
-  const readFileAsBase64 = (file, onProgress) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      
-      reader.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const progress = Math.round((event.loaded / event.total) * 100);
-          onProgress(progress);
-        }
-      };
-      
-      reader.onload = () => {
-        const result = reader.result.split(',')[1];
-        // Clean up event handlers
-        reader.onload = null;
-        reader.onprogress = null;
-        reader.onerror = null;
-        resolve(result);
-      };
-
-      reader.onerror = (error) => {
-        // Clean up event handlers
-        reader.onload = null;
-        reader.onprogress = null;
-        reader.onerror = null;
-        reject(error);
-      };
-      
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const processAudioChunk = async (base64Data, mimeType) => {
-    try {
-      const response = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=' + API_KEY,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: "Transcribe this audio chunk. Keep original languages."
-              }, {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: base64Data
-                }
-              }]
-            }]
-          })
-        }
-      );
-
-      if (!response.ok) throw new Error('Processing failed');
-      const data = await response.json();
-      return data.candidates[0].content.parts[0].text;
-    } finally {
-      // No need to clear base64Data here as it's handled by the caller
-    }
-  };
-
-  const processAudioFile = async (base64Data, mimeType) => {
-    try {
-      const response = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=' + API_KEY,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: "Transcribe this audio. Keep original languages. Format in paragraphs."
-              }, {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: base64Data
-                }
-              }]
-            }]
-          })
-        }
-      );
-
-      if (!response.ok) throw new Error('Processing failed');
-      const data = await response.json();
-      return data.candidates[0].content.parts[0].text;
-    } finally {
-      // No need to clear base64Data here as it's handled by the caller
-    }
-  };
-
+  // Update handleAudioUpload to use handleFileRead
   const handleAudioUpload = async (event) => {
     const file = event.target.files[0];
-    if (file) {
-      if (file.size > 50 * 1024 * 1024) {
-        setError('Error: File size must be under 50MB');
-        return;
-      }
-      setLoading(true);
-      setAudioFile(file);
-      setError('');
-      setResponse('');
-      
-      try {
-        const transcription = await handleFileRead(
-          file,
-          setUploadProgress,
-          setProcessingProgress
-        );
-        
-        setResponse(transcription);
+    if (!file) return;
 
-        // Generate analyses in parallel
-        const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
-          getSummary(transcription),
-          getKeyTakeaways(transcription),
-          getResources(transcription)
-        ]);
-
-        setSummary(summaryText);
-        setKeyTakeaways(keyTakeawaysText);
-        setResources(resourcesText);
-        
+    try {
+      await handleFileRead(file);
       } catch (error) {
-        setError('Error: ' + error.message);
         console.error('Upload/Processing error:', error);
-      } finally {
-        setLoading(false);
-        setUploadProgress(0);
-        setProcessingProgress(0);
-      }
+      setError(error.message || 'Failed to process audio file');
     }
   };
 
+// Remove chunking-related state variables
+const [uploadProgress, setUploadProgress] = useState(0);
+const [processingProgress, setProcessingProgress] = useState(0);
+const [chunksRef, setChunksRef] = useState([]);
+
+// Update startRecording function to remove chunking references
   const startRecording = async () => {
     try {
       const constraints = {
-        audio: selectedDevice ? { deviceId: { exact: selectedDevice } } : true
+      audio: {
+        deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
+          channelCount: 2,
+          sampleRate: 44100,
+          sampleSize: 16,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
       };
       
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      chunksRef.current = [];
+    mediaRecorderRef.current = new MediaRecorder(stream, {
+      mimeType: 'audio/webm;codecs=opus',
+        bitsPerSecond: 128000  // Increased to 128kbps to avoid bitrate warning
+    });
 
+    let audioChunks = [];
       mediaRecorderRef.current.ondataavailable = (e) => {
         if (e.data.size > 0) {
-          chunksRef.current.push(e.data);
-        }
-      };
+        audioChunks.push(e.data);
+      }
+    };
 
-      mediaRecorderRef.current.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/wav' });
-        const file = new File([blob], 'recording.wav', { type: 'audio/wav' });
-        setAudioFile(file);
-        setError('');
-        setLoading(true);
-        
-        try {
-          const transcription = await handleFileRead(
-            file,
-            setUploadProgress,
-            setProcessingProgress
-          );
-          
-          setResponse(transcription);
-
-          // Generate analyses in parallel
-          const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
-            getSummary(transcription),
-            getKeyTakeaways(transcription),
-            getResources(transcription)
-          ]);
-
-          setSummary(summaryText);
-          setKeyTakeaways(keyTakeawaysText);
-          setResources(resourcesText);
-          
-        } catch (error) {
-          setError('Error: ' + error.message);
-          console.error('Processing error:', error);
-        } finally {
-          setLoading(false);
-          setUploadProgress(0);
-          setProcessingProgress(0);
-        }
+    mediaRecorderRef.current.onstop = () => {
+      const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+      const audioFile = new File([audioBlob], 'recording.webm', { 
+        type: 'audio/webm',
+        lastModified: Date.now()
+      });
+      handleFileRead(audioFile);
+      audioChunks = [];
       };
 
       mediaRecorderRef.current.start();
@@ -791,11 +720,52 @@ const GeminiAudioApp = () => {
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === 'recording') {
+// Update confirmStopRecording to remove chunking references
+const confirmStopRecording = async () => {
+  if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') return;
+
+  try {
+    setShowStopDialog(false);
       mediaRecorderRef.current.stop();
+    
+    // Clean up
+    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
       mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    mediaRecorderRef.current = null;
       setIsRecording(false);
+  } catch (error) {
+    console.error('Error stopping recording:', error);
+    setError('Failed to stop recording. Please try again.');
+    setIsRecording(false);
+    setShowStopDialog(false);
+    
+    // Clean up on error
+    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    mediaRecorderRef.current = null;
+  }
+};
+
+const stopRecording = () => {
+  if (mediaRecorderRef.current?.state === 'recording') {
+    setShowStopDialog(true);
+  }
+};
+
+const cancelStopRecording = () => {
+  setShowStopDialog(false);
+};
+
+  // Update the recording handler
+  const handleRecordingComplete = async (blob) => {
+    try {
+    const file = new File([blob], 'recording.webm', { type: 'audio/webm' });
+      await handleFileRead(file);
+    } catch (error) {
+      console.error('Recording processing error:', error);
+      setError(error.message || 'Failed to process recording');
     }
   };
 
@@ -837,132 +807,6 @@ const GeminiAudioApp = () => {
     return result.trim();
   };
 
-  // Add retry logic for Gemini API calls
-  const callGeminiAPI = async (prompt, text, retries = 3, delay = 1000) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        // Add delay between retries
-        if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
-        }
-
-        const response = await fetch(
-          'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=' + API_KEY,
-          {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-                  text: `${prompt}\n\n${text}`
-            }]
-          }]
-        })
-          }
-        );
-
-      if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`Gemini API error (attempt ${i + 1}):`, errorText);
-          
-          // If we get rate limited, wait longer
-          if (response.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            continue;
-          }
-          
-          throw new Error(`API request failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
-      return data.candidates[0].content.parts[0].text;
-      } catch (error) {
-        if (i === retries - 1) throw error;
-        console.log(`Retrying after error (attempt ${i + 1}):`, error);
-      }
-    }
-  };
-
-  // Update getSummary function
-  const getSummary = async (transcription) => {
-    try {
-      if (transcription.length > 30000) {
-        return await processLargeText(transcription, 
-          "Summarise the transcription in a short manner. Use same language of the transcription."
-        );
-      }
-
-      return await callGeminiAPI(
-        "Summarise the transcription in a short manner. Use same language of the transcription:",
-        transcription
-      );
-    } catch (error) {
-      console.error('Summary generation error:', error);
-      throw error;
-    }
-  };
-
-  const getKeyTakeaways = async (transcription) => {
-    try {
-      return await callGeminiAPI(
-        `You should provide the keytakeways of the following transcribed text in the format:
-
-no.
-Key Take away Heading
-keytake away in max 2-3 sentences
-relevant key take away hashtags in english
-
-Do not add anything other than these elements in the completion. Provide output in the same language as the transcription. Ensure all the content are covered. min 10 keytakeways
-
-Transcription:`,
-        transcription
-      );
-    } catch (error) {
-      console.error('Key takeaways generation error:', error);
-      throw error;
-    }
-  };
-
-  const getResources = async (transcription) => {
-    try {
-      return await callGeminiAPI(
-        `Extract and organize resources mentioned in the transcription in the following format:
-
-Resource Type: [Type Name]
-1. [Resource Title]
-[2-3 sentence description of the resource and its relevance]
-[URL or reference if available]
-#[relevant hashtag] #[relevant hashtag] #[relevant hashtag]
-
-2. [Next Resource Title]
-[Description]
-[URL]
-#[hashtags]
-
-Resource Type: [Next Type]
-1. [Resource Title]
-[Description]
-[URL]
-#[hashtags]
-
-Important Notes:
-- Group similar resources under clear type headings (Books, Articles, Tools, etc.)
-- output must be in original language of transcription
-- Each resource must have a title and description
-- Add relevant hashtags for each resource
-- Include URLs where available USING GOOGLE GROUNDING
-- Keep descriptions focused and valuable
-- Number resources within each type
-
-Transcription:`,
-        transcription
-      );
-    } catch (error) {
-      console.error('Resources generation error:', error);
-      throw error;
-    }
-  };
-
   // Add copy function
   const handleCopy = async (text, type) => {
     try {
@@ -995,45 +839,52 @@ Transcription:`,
   const parseKeyTakeaways = (text) => {
     if (!text) return [];
     
-    // If text is already an array of takeaways, return it as is
-    if (Array.isArray(text)) {
-      return text;
-    }
-    
-    // If text is not a string, return empty array
-    if (typeof text !== 'string') {
-      return [];
-    }
+  if (Array.isArray(text)) return text;
+  if (typeof text !== 'string') return [];
 
     const takeaways = [];
-    let currentTakeaway = { number: '', heading: '', content: '', hashtags: '' };
+  const sections = text.split(/\d+\./).filter(section => section.trim());
+
+  sections.forEach((section, index) => {
+    const lines = section.trim().split('\n').filter(line => line.trim());
     
-    const lines = text.split('\n');
-    for (let line of lines) {
-      line = line.trim();
-      if (!line) continue;
-      
-      if (/^\d+\.?$/.test(line)) {
-        // If we have a previous takeaway, save it
-        if (currentTakeaway.heading) {
-          takeaways.push({ ...currentTakeaway });
-        }
-        currentTakeaway = { number: line, heading: '', content: '', hashtags: '' };
-      } else if (currentTakeaway.number && !currentTakeaway.heading) {
-        currentTakeaway.heading = line;
-      } else if (currentTakeaway.heading && !currentTakeaway.content) {
-        currentTakeaway.content = line;
-      } else if (line.includes('#')) {
-        currentTakeaway.hashtags = line;
-        takeaways.push({ ...currentTakeaway });
-        currentTakeaway = { number: '', heading: '', content: '', hashtags: '' };
+    // Skip if section is empty
+    if (lines.length === 0) return;
+
+    const takeaway = {
+      number: index + 1,
+      heading: '',
+      content: '',
+      hashtags: []
+    };
+
+    // First non-empty line is the heading
+    takeaway.heading = lines[0].trim();
+
+    // Collect all lines between heading and hashtags as content
+    const contentLines = [];
+    let hashtagIndex = -1;
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.includes('#')) {
+        hashtagIndex = i;
+        break;
       }
+      contentLines.push(line);
     }
-    
-    // Add the last takeaway if exists
-    if (currentTakeaway.heading) {
-      takeaways.push(currentTakeaway);
+
+    // Set content and hashtags
+    takeaway.content = contentLines.join('\n').trim();
+    if (hashtagIndex !== -1 && hashtagIndex < lines.length) {
+      takeaway.hashtags = lines[hashtagIndex].split(/\s+/).filter(tag => tag.startsWith('#'));
     }
+
+    // Only add takeaway if it has both heading and content
+    if (takeaway.heading && takeaway.content) {
+      takeaways.push(takeaway);
+    }
+  });
     
     return takeaways;
   };
@@ -1082,166 +933,182 @@ Transcription:`,
     );
   };
 
-  // Update parseResources function to handle the new format
+  // Update parseResources function to handle more cases
   const parseResources = (text) => {
     if (!text) return [];
 
     // If text is already an array of resource types, return it as is
-    if (Array.isArray(text)) {
-      return text;
-    }
+    if (Array.isArray(text)) return text;
 
     // If text is not a string, return empty array
-    if (typeof text !== 'string') {
-      return [];
-    }
+    if (typeof text !== 'string') return [];
 
-    const resourceTypes = [];
-    let currentType = { type: '', resources: [] };
-    let currentResource = { number: '', title: '', description: '', link: '', hashtags: '' };
-    
-    const lines = text.split('\n');
-    for (let line of lines) {
+    // Split by resource types
+    const resourceTypes = text.split(/Resource Type:/)
+      .filter(Boolean)
+      .map(section => {
+        const lines = section.trim().split('\n').filter(Boolean);
+        const type = lines[0].trim();
+        const resources = [];
+        let currentResource = {};
+
+        lines.slice(1).forEach(line => {
       line = line.trim();
-      if (!line) continue;
-      
-      if (line.startsWith('Resource Type:')) {
-        // Save previous type if it exists
-        if (currentType.type && currentResource.title) {
-          currentType.resources.push({ ...currentResource });
-          resourceTypes.push({ ...currentType });
-        } else if (currentType.type) {
-          resourceTypes.push({ ...currentType });
-        }
-        currentType = { type: line.replace('Resource Type:', '').trim(), resources: [] };
-        currentResource = { number: '', title: '', description: '', link: '', hashtags: '' };
-      } else if (line.match(/^\d+\./)) {
-        // Save previous resource if it exists
-        if (currentResource.title) {
-          currentType.resources.push({ ...currentResource });
+          
+          // New resource entry
+          if (line.match(/^\d+\./)) {
+            if (Object.keys(currentResource).length > 0) {
+              resources.push(currentResource);
         }
         currentResource = { 
-          number: line.match(/^\d+/)[0], 
           title: line.replace(/^\d+\./, '').trim(),
           description: '',
           link: '',
-          hashtags: ''
-        };
-      } else if (line.startsWith('#')) {
-        currentResource.hashtags = line;
-      } else if (line.startsWith('http') || line.includes('www.')) {
-        currentResource.link = line;
-      } else if (currentResource.title && !currentResource.description) {
+              hashtags: []
+            };
+          }
+          // Description line
+          else if (line.startsWith('Description:')) {
+            currentResource.description = line.replace('Description:', '').trim();
+          }
+          // Link line
+          else if (line.startsWith('Link:')) {
+            currentResource.link = line.replace('Link:', '').trim();
+          }
+          // Hashtags line
+          else if (line.startsWith('#')) {
+            currentResource.hashtags = line.split(/\s+/).filter(tag => tag.startsWith('#'));
+          }
+          // Additional description text
+          else if (currentResource.title && !line.startsWith('Resource Type:')) {
+            if (!currentResource.description) {
         currentResource.description = line;
       }
     }
-    
-    // Add the last resource and type if they exist
-    if (currentResource.title) {
-      currentType.resources.push(currentResource);
-    }
-    if (currentType.type) {
-      resourceTypes.push(currentType);
-    }
-    
-    return resourceTypes;
+        });
+
+        // Add the last resource
+        if (Object.keys(currentResource).length > 0) {
+          resources.push(currentResource);
+        }
+
+        return {
+          type,
+          resources
+        };
+      });
+
+    // Filter out empty resource types
+    return resourceTypes.filter(type => type.resources.length > 0);
   };
 
-  // Update renderTabContent for Resources with improved layout
-  const renderTabContent = (content, type) => {
     // Helper function to detect Malayalam text
     const isMalayalam = (text) => {
+    if (!text) return false;
       return /[\u0D00-\u0D7F]/.test(text);
     };
 
-    const textClassName = isMalayalam(content) ? 'malayalam-text' : '';
+  const renderText = (text, additionalClasses = '') => {
+    const classes = `${isMalayalam(text) ? 'malayalam-text' : ''} ${additionalClasses}`.trim();
+    return <p className={classes}>{text}</p>;
+  };
 
+  // Update renderTabContent for Summary and Key Takeaways sections
+  const renderTabContent = (content, type) => {
     if (type === 'Resources') {
       const resourceTypes = parseResources(content);
-    return (
+      return (
         <div className="space-y-8">
-          {resourceTypes.map((resourceType, typeIndex) => (
-            <div key={typeIndex} className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-8 w-1 bg-indigo-600 rounded-full"></div>
-                  <h2 className="text-xl font-semibold text-gray-900">
-                    {resourceType.type}
-                  </h2>
-              </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => handleCopy(resourceType.resources.map(r => 
-                      `${r.title}\n${r.description}${r.link ? '\n' + r.link : ''}`
-                    ).join('\n\n'), resourceType.type)}
-                    className="flex items-center gap-2 px-3 py-1.5 text-gray-600 hover:text-indigo-600 border rounded hover:border-indigo-600 transition-colors"
-              >
-                <Copy className="w-4 h-4" />
-                    <span className="text-sm">Copy</span>
-                  </button>
-                  <button
-                    onClick={() => handleShare(resourceType.resources.map(r => 
-                      `${r.title}\n${r.description}${r.link ? '\n' + r.link : ''}`
-                    ).join('\n\n'), resourceType.type)}
-                    className="flex items-center gap-2 px-3 py-1.5 text-gray-600 hover:text-indigo-600 border rounded hover:border-indigo-600 transition-colors"
-              >
-                <Share2 className="w-4 h-4" />
-                    <span className="text-sm">Share</span>
-                  </button>
+          {resourceTypes.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              No resources found in the transcription.
             </div>
-          </div>
-              <div className="grid gap-4">
-                {resourceType.resources.map((resource, index) => (
-                  <div key={index} className="bg-white p-4 rounded-lg border border-gray-200 hover:border-indigo-200 transition-colors">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-2">
-                          <span className="text-sm font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">
-                            {resource.number}
-                          </span>
-                          <h3 className={`text-lg font-semibold text-gray-900 ${isMalayalam(resource.title) ? 'malayalam-text' : ''}`}>
-                            {resource.title}
-                          </h3>
+          ) : (
+            resourceTypes.map((resourceType, typeIndex) => (
+                <div key={typeIndex} className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="h-8 w-1 bg-indigo-600 rounded-full"></div>
+                    <h2 className={`text-xl font-semibold text-gray-900 text-left ${isMalayalam(resourceType.type) ? 'malayalam-text' : ''}`}>
+                        {resourceType.type || 'General Resources'}
+                      </h2>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {resourceType.resources.map((resource, index) => (
+                      <div key={index} className="bg-white p-4 rounded-lg border border-gray-200 hover:border-indigo-200 transition-colors">
+                        <div className="flex flex-col h-full">
+                          <div className="flex items-start justify-between gap-4 mb-3">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-3 mb-2">
+                                <span className="text-sm font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">
+                                  {resource.number || (index + 1)}
+                                </span>
+                              <h3 className={`text-lg font-semibold text-gray-900 text-left ${isMalayalam(resource.title) ? 'malayalam-text' : ''}`}>
+                                  {resource.title}
+                                </h3>
+                              </div>
+                              {resource.description && (
+                                <p className={`text-gray-600 mb-3 text-left ${isMalayalam(resource.description) ? 'malayalam-text' : ''}`}>
+                                  {resource.description}
+                                </p>
+                              )}
+                            </div>
+                          <div className="flex gap-1 flex-shrink-0">
+                              <button
+                                onClick={() => handleCopy(`${resource.title}\n${resource.description}${resource.link ? '\n' + resource.link : ''}`, `Resource ${resource.number || (index + 1)}`)}
+                                className="p-1.5 text-gray-400 hover:text-indigo-600 rounded"
+                              >
+                                <Copy className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleShare(`${resource.title}\n${resource.description}${resource.link ? '\n' + resource.link : ''}`, `Resource ${resource.number || (index + 1)}`)}
+                                className="p-1.5 text-gray-400 hover:text-indigo-600 rounded"
+                              >
+                                <Share2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                          {resource.link && (
+                            <div className="mt-auto pt-2 border-t border-gray-100">
+                              <a 
+                                href={resource.link}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-700 text-sm font-medium break-all hover:underline text-left"
+                              >
+                                <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                  <polyline points="15 3 21 3 21 9" />
+                                  <line x1="10" y1="14" x2="21" y2="3" />
+                                </svg>
+                                {resource.link}
+                              </a>
+                            </div>
+                          )}
+                          {resource.hashtags && resource.hashtags.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-3 text-left">
+                              {Array.isArray(resource.hashtags) 
+                                ? resource.hashtags.map((tag, i) => (
+                                    <span key={i} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-600 ${isMalayalam(tag) ? 'malayalam-text' : ''}`}>
+                                      {tag.startsWith('#') ? tag : `#${tag}`}
+                                    </span>
+                                  ))
+                                : resource.hashtags.split(/\s+/).filter(tag => tag.startsWith('#')).map((tag, i) => (
+                                    <span key={i} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-600 ${isMalayalam(tag) ? 'malayalam-text' : ''}`}>
+                                      {tag}
+                                    </span>
+                                  ))
+                              }
+                            </div>
+                          )}
                         </div>
-                        <p className={`text-gray-600 mb-3 text-left ${isMalayalam(resource.description) ? 'malayalam-text' : ''}`}>
-                          {resource.description}
-                        </p>
-          {resource.link && (
-            <a 
-              href={resource.link}
-              target="_blank"
-              rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-700 text-sm font-medium"
-            >
-              Visit Resource
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
-            </a>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+            ))
           )}
-        </div>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => handleCopy(`${resource.title}\n${resource.description}${resource.link ? '\n' + resource.link : ''}`, `Resource ${resource.number}`)}
-                          className="p-1.5 text-gray-400 hover:text-indigo-600 rounded"
-              >
-                <Copy className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleShare(`${resource.title}\n${resource.description}${resource.link ? '\n' + resource.link : ''}`, `Resource ${resource.number}`)}
-                          className="p-1.5 text-gray-400 hover:text-indigo-600 rounded"
-              >
-                <Share2 className="w-4 h-4" />
-                        </button>
-            </div>
-          </div>
-            </div>
-                ))}
-              </div>
-            </div>
-          ))}
         </div>
       );
     }
@@ -1253,22 +1120,18 @@ Transcription:`,
           {takeaways.map((takeaway, index) => (
             <div key={index} className="bg-white rounded-lg p-6 border border-gray-200 hover:border-indigo-200 transition-colors">
               <div className="flex items-start justify-between gap-4">
-                <div className="flex gap-4">
+                <div className="flex gap-4 flex-1">
                   <div className="flex-shrink-0">
                     <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-semibold">
                       {index + 1}
                     </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className={`text-lg font-semibold text-gray-900 mb-2 text-left ${isMalayalam(takeaway.heading) ? 'malayalam-text' : ''}`}>
-                      {takeaway.heading}
-                    </h3>
-                    <p className={`text-gray-600 mb-3 leading-relaxed text-left ${isMalayalam(takeaway.content) ? 'malayalam-text' : ''}`}>
-                      {takeaway.content}
-                    </p>
+                  <div className="flex-1">
+                    {renderText(takeaway.heading, 'text-lg font-semibold text-gray-900 mb-2 text-left')}
+                    {renderText(takeaway.content, 'text-gray-600 mb-3 leading-relaxed text-left')}
                     {takeaway.hashtags && (
                       <div className="flex flex-wrap gap-2">
-                        {takeaway.hashtags.split(' ').map((tag, i) => (
+                        {takeaway.hashtags.map((tag, i) => (
                           <span key={i} className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-600">
                             {tag}
                           </span>
@@ -1290,22 +1153,20 @@ Transcription:`,
             >
               <Share2 className="w-4 h-4" />
                   </button>
+          </div>
             </div>
-              </div>
-            </div>
+          </div>
           ))}
         </div>
       );
     }
 
     // For Summary and Transcription
-    return (
-      <div className="bg-white rounded-lg p-6 border border-gray-200">
-        <div className="flex justify-between items-start gap-4 mb-4">
-          <div className="prose max-w-none flex-1">
-            <p className={`text-gray-600 leading-relaxed whitespace-pre-wrap text-left ${textClassName}`}>
-              {content}
-            </p>
+      return (
+        <div className="bg-white rounded-lg p-6 border border-gray-200">
+          <div className="flex justify-between items-start gap-4">
+            <div className="prose max-w-none flex-1">
+            {renderText(content, 'text-gray-600 leading-relaxed whitespace-pre-wrap text-left')}
           </div>
           <div className="flex gap-1">
             <button
@@ -1326,9 +1187,315 @@ Transcription:`,
     );
   };
 
+  // Add progress bar component
+  const ProgressBar = ({ progress }) => (
+    <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+      <div 
+        className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300 ease-out"
+        style={{ width: `${progress}%` }}
+      />
+      <div className="text-center text-sm text-gray-600 mt-1">
+        {progress < 100 ? `Processing: ${Math.round(progress)}%` : 'Complete!'}
+      </div>
+    </div>
+  );
+
+  // Add YouTube video ID extraction function
+  const getVideoId = (url) => {
+    if (!url) return null;
+    
+    // Handle different YouTube URL formats
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
+      /youtube\.com\/watch\?.*v=([^&\n?#]+)/,
+      /youtube\.com\/shorts\/([^&\n?#]+)/
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+
+    return null;
+  };
+
+  // Update handleYoutubeExtract to use getVideoId
+  const handleYoutubeExtract = async () => {
+    if (!youtubeUrl) return;
+    setLoading(true);
+    setError('');
+    setResponse('');
+    setSummary('');
+    setKeyTakeaways('');
+    setResources('');
+    setSmoothProgress(0);
+    
+    try {
+      const videoId = getVideoId(youtubeUrl);
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL. Please enter a valid YouTube video URL.');
+      }
+
+      console.log('Extracting captions for video:', videoId);
+
+      // Call backend endpoint for caption extraction
+      const response = await fetch('http://localhost:3001/api/youtube/transcribe', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          videoId,
+          url: youtubeUrl,
+          title: 'YouTube Video'
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to extract captions');
+      }
+
+      console.log('Received response:', data);
+      
+      let transcriptText;
+      
+      if (data.message === 'Transcription found in database') {
+        console.log('Found existing transcription');
+        // If transcription exists, use it
+        const transcription = data.transcription;
+        if (!transcription || !transcription.transcription || !transcription.transcription.text) {
+          throw new Error('Invalid transcription data received');
+        }
+
+        transcriptText = transcription.transcription.text;
+        setSmoothProgress(50);
+      } else {
+        if (!data.transcription || !data.transcription.transcription || !data.transcription.transcription.text) {
+          throw new Error('Invalid response format from server');
+        }
+        transcriptText = data.transcription.transcription.text;
+        setSmoothProgress(50);
+      }
+
+      if (!transcriptText) {
+        throw new Error('No captions found. The video might not have captions enabled.');
+      }
+
+      console.log('Setting transcription text');
+      setResponse(transcriptText);
+      setSmoothProgress(70);
+      
+      // Always generate fresh analyses using Gemini
+      console.log('Generating fresh analyses with Gemini...');
+      const [summaryText, keyTakeawaysText, resourcesText] = await Promise.all([
+        getSummary(transcriptText),
+        getKeyTakeaways(transcriptText),
+        getResources(transcriptText)
+      ]);
+
+      console.log('Setting analyses results');
+      setSummary(summaryText);
+      setKeyTakeaways(keyTakeawaysText);
+      setResources(resourcesText);
+      setSmoothProgress(90);
+
+      // Save everything to MongoDB
+      console.log('Saving to MongoDB');
+      await saveToMongoDB({
+        title: 'YouTube Video',
+        source: 'youtube',
+        sourceUrl: youtubeUrl,
+        transcription: transcriptText,
+        summary: summaryText,
+        keyTakeaways: keyTakeawaysText,
+        resources: resourcesText,
+        metadata: {
+          videoId: videoId,
+          url: youtubeUrl
+        }
+      });
+      setSmoothProgress(100);
+      
+    } catch (error) {
+      console.error('YouTube extraction error:', error);
+      setError(error.message || 'Failed to process video');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const regenerateSummary = async () => {
+    try {
+      setLoading(true);
+      const newSummary = await getSummary(response);
+      setSummary(newSummary);
+    } catch (error) {
+      console.error('Error regenerating summary:', error);
+      setError('Failed to regenerate summary');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const regenerateKeyTakeaways = async () => {
+    try {
+      setLoading(true);
+      const newTakeaways = await getKeyTakeaways(response);
+      setKeyTakeaways(newTakeaways);
+    } catch (error) {
+      console.error('Error regenerating key takeaways:', error);
+      setError('Failed to regenerate key takeaways');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const regenerateResources = async () => {
+    try {
+      setLoading(true);
+      const newResources = await getResources(response);
+      setResources(newResources);
+    } catch (error) {
+      console.error('Error regenerating resources:', error);
+      setError('Failed to regenerate resources');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Add useEffect to fetch audio devices
+  useEffect(() => {
+    const getAudioDevices = async () => {
+      try {
+        // First request permission to access media devices
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        // Then enumerate devices
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(device => device.kind === 'audioinput');
+        
+        setAudioDevices(audioInputs);
+        
+        // Set default device if available
+        if (audioInputs.length > 0 && !selectedDevice) {
+          setSelectedDevice(audioInputs[0].deviceId);
+        }
+      } catch (error) {
+        console.error('Error getting audio devices:', error);
+        setError('Error accessing microphone. Please ensure microphone permissions are granted.');
+      }
+    };
+
+    getAudioDevices();
+
+    // Add device change listener
+    navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
+
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
+    };
+  }, []);
+
+  // Add font styles
+  const malayalamStyles = `
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+Malayalam:wght@400;500;600;700&display=swap');
+    
+    .malayalam-text {
+      font-family: 'Noto Serif Malayalam', serif;
+      line-height: 1.8;
+      font-size: 1.1em;
+    }
+    
+    /* Ensure proper rendering on all browsers */
+    @font-face {
+      font-family: 'Noto Serif Malayalam';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url(https://fonts.gstatic.com/s/notoserifmalayalam/v28/JIAZUU5sdj9pHd3IqK5s0gBjwwN-1jNZ.woff2) format('woff2');
+      unicode-range: U+0307, U+0323, U+0964-0965, U+0D02-0D7F, U+200C-200D, U+20B9, U+25CC;
+    }
+  `;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-600 to-blue-500">
-      <style>{styles}</style>
+      <style>{malayalamStyles}</style>
+      {showStopDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Stop Recording?</h3>
+            <p className="text-gray-600 mb-6">Are you sure you want to stop recording? This action cannot be undone.</p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={cancelStopRecording}
+                className="px-4 py-2 text-gray-600 hover:text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmStopRecording}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              >
+                Stop Recording
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showRetryDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+            <div className="flex items-center gap-3 mb-4">
+              <AlertCircle className="w-6 h-6 text-red-600" />
+              <h3 className="text-lg font-semibold text-gray-900">Error Occurred</h3>
+            </div>
+            <p className="text-gray-600 mb-6">
+              {savingError ? 
+                'There was an error saving your data to the database. Would you like to retry?' :
+                'There was an error processing your file. Would you like to retry?'}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowRetryDialog(false);
+                  setRetryData(null);
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowRetryDialog(false);
+                  if (savingError) {
+                    retryDatabaseSave();
+                  } else if (retryData?.file) {
+                    handleFileRead(retryData.file);
+                  }
+                }}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12a9 9 0 11-9-9c2.52 0 4.85.99 6.57 2.57L21 8M21 3v5h-5" />
+                </svg>
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {saveStatus && (
+        <div className="fixed bottom-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-50">
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M20 6L9 17l-5-5" />
+          </svg>
+          {saveStatus}
+        </div>
+      )}
       <div className="container mx-auto px-4 py-8">
         <div className="text-center mb-12">
           <h1 className="text-4xl md:text-5xl font-bold text-white mb-4 flex items-center justify-center gap-3">
@@ -1414,10 +1581,20 @@ Transcription:`,
                     <div className="space-y-4">
                       <AudioPlayer file={audioFile} />
                       {loading ? (
-                        <div className="flex items-center justify-center gap-3 text-indigo-600">
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          <span>Processing...</span>
-                        </div>
+                        <div className="space-y-4">
+                          <ProgressBar progress={smoothProgress} />
+                          <div className="flex items-center justify-center gap-3 text-indigo-600">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            <span>
+                              {smoothProgress < 40 ? 'Processing audio...' :
+                               smoothProgress < 70 ? 'Generating transcription...' :
+                               smoothProgress < 80 ? 'Creating summary...' :
+                               smoothProgress < 90 ? 'Extracting key takeaways...' :
+                               smoothProgress < 95 ? 'Finding resources...' :
+                               'Saving to database...'}
+                            </span>
+                  </div>
+              </div>
                       ) : response ? (
                         <div className="flex justify-center gap-4">
                           <button
@@ -1433,7 +1610,7 @@ Transcription:`,
                           >
                             Upload New Audio
                           </button>
-                        </div>
+              </div>
                       ) : (
                         <button
                           onClick={() => handleFileRead(audioFile)}
@@ -1462,32 +1639,65 @@ Transcription:`,
                       <p className="text-gray-600 mb-4">
                         {isRecording ? 'Recording... Click to stop' : 'Click the microphone to start recording'}
                       </p>
-                      <select 
-                        className="w-full max-w-md mx-auto block px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                        value={selectedDevice || ''}
-                        onChange={(e) => setSelectedDevice(e.target.value)}
-                      >
-                        {audioDevices.map((device) => (
-                          <option key={device.deviceId} value={device.deviceId}>
-                            {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
-                          </option>
-                        ))}
-                      </select>
-                    </>
-                  ) : (
+                      <div className="w-full max-w-md mx-auto">
+                        <label htmlFor="microphone-select" className="block text-sm font-medium text-gray-700 mb-2">
+                          Select Microphone
+                        </label>
+                        <div className="relative">
+                  <select
+                            id="microphone-select"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 appearance-none bg-white"
+                    value={selectedDevice || ''}
+                    onChange={(e) => setSelectedDevice(e.target.value)}
+                            disabled={isRecording}
+                  >
+                            {audioDevices.length === 0 ? (
+                              <option value="">No microphones found</option>
+                            ) : (
+                              audioDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
+                      </option>
+                              ))
+                            )}
+                  </select>
+                          <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
+                            <svg className="w-5 h-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                          </div>
+                        </div>
+                        {audioDevices.length === 0 && (
+                          <p className="mt-2 text-sm text-red-600">
+                            No microphones detected. Please connect a microphone and grant permission.
+                          </p>
+                        )}
+                      </div>
+                  </>
+                ) : (
                     <div className="space-y-4">
                       <AudioPlayer file={audioFile} />
-                      {loading ? (
-                        <div className="flex items-center justify-center gap-3 text-indigo-600">
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          <span>Processing...</span>
+                    {loading ? (
+                        <div className="space-y-4">
+                          <ProgressBar progress={smoothProgress} />
+                          <div className="flex items-center justify-center gap-3 text-indigo-600">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            <span>
+                              {smoothProgress < 40 ? 'Processing audio...' :
+                               smoothProgress < 70 ? 'Generating transcription...' :
+                               smoothProgress < 80 ? 'Creating summary...' :
+                               smoothProgress < 90 ? 'Extracting key takeaways...' :
+                               smoothProgress < 95 ? 'Finding resources...' :
+                               'Saving to database...'}
+                </span>
+              </div>
                         </div>
                       ) : response ? (
                         <div className="flex justify-center gap-4">
                           <button
-                            onClick={() => {
-                              setAudioFile(null);
-                              setResponse('');
+                onClick={() => {
+                  setAudioFile(null);
+                  setResponse('');
                               setSummary('');
                               setKeyTakeaways('');
                               setResources('');
@@ -1497,7 +1707,7 @@ Transcription:`,
                           >
                             Record New Audio
                           </button>
-                        </div>
+            </div>
                       ) : (
                         <button
                           onClick={() => handleFileRead(audioFile)}
@@ -1506,7 +1716,7 @@ Transcription:`,
                           Start Transcription
                         </button>
                       )}
-                    </div>
+                  </div>
                   )}
                 </div>
               )}
@@ -1514,27 +1724,29 @@ Transcription:`,
               {activeTab === 'youtube' && (
                 <div className="bg-gray-50 rounded-lg p-12">
                   <Youtube className="w-12 h-12 mx-auto text-red-600 mb-4" />
-                  <input
-                    type="text"
-                    placeholder="Paste YouTube URL here"
-                    value={youtubeUrl}
-                    onChange={(e) => setYoutubeUrl(e.target.value)}
-                    className="w-full max-w-md mx-auto block px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 mb-4"
-                  />
-                  <button 
-                    className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
-                    onClick={handleYoutubeExtract} 
-                    disabled={!youtubeUrl || loading}
-                  >
-                    {loading ? (
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Extracting...
-                      </div>
-                    ) : (
-                      'Extract Audio'
-                    )}
-                  </button>
+                  <div className="flex flex-col space-y-4">
+                      <input
+                        type="text"
+                        placeholder="Paste YouTube URL here"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        value={youtubeUrl}
+                        onChange={(e) => setYoutubeUrl(e.target.value)}
+                      />
+                      <button
+                      className="w-full px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
+                        onClick={handleYoutubeExtract}
+                        disabled={!youtubeUrl || loading}
+                      >
+                        {loading ? (
+                        <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            Extracting...
+                </div>
+                        ) : (
+                          'Extract Audio'
+                        )}
+                      </button>
+              </div>
                 </div>
           )}
 
@@ -1554,9 +1766,7 @@ Transcription:`,
                         <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                           <polyline points="14 2 14 8 20 8" />
-                          <line x1="16" y1="13" x2="8" y2="13" />
-                          <line x1="16" y1="17" x2="8" y2="17" />
-                          <line x1="10" y1="9" x2="8" y2="9" />
+                          <line x1="16" y1="13" x2="21" y2="3" />
                         </svg>
                     Full Transcription
                       </button>
@@ -1599,7 +1809,7 @@ Transcription:`,
                         } flex items-center gap-2 transition-colors`}
                       >
                         <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 21 16z" />
                           <polyline points="3.29 7 12 12 20.71 7" />
                           <line x1="12" y1="22" x2="12" y2="12" />
                         </svg>
@@ -1620,24 +1830,54 @@ Transcription:`,
                           {activeResultTab === 'resources' && 'Available Resources'}
                         </h2>
                         
-                        {activeResultTab === 'resources' && (
                           <div className="flex items-center gap-3">
+                          {activeResultTab !== 'transcription' && (
                             <button
-                              onClick={() => handleCopy(resources, 'Resources')}
-                              className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-indigo-600 border rounded-lg hover:border-indigo-600 transition-colors"
+                              onClick={
+                                activeResultTab === 'summary' ? regenerateSummary :
+                                activeResultTab === 'keytakeaways' ? regenerateKeyTakeaways :
+                                regenerateResources
+                              }
+                              disabled={loading}
+                              className="flex items-center gap-2 px-3 py-1.5 text-indigo-600 hover:text-indigo-700 border-2 border-indigo-600 rounded hover:border-indigo-700 transition-colors disabled:opacity-50"
+                            >
+                              {loading ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16" />
+                                </svg>
+                              )}
+                              <span className="text-sm">{loading ? 'Regenerating...' : 'Regenerate'}</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleCopy(
+                              activeResultTab === 'transcription' ? response :
+                              activeResultTab === 'summary' ? summary :
+                              activeResultTab === 'keytakeaways' ? keyTakeaways :
+                              resources,
+                              activeResultTab
+                            )}
+                            className="flex items-center gap-2 px-3 py-1.5 text-gray-600 hover:text-indigo-600 border rounded hover:border-indigo-600 transition-colors"
                             >
                               <Copy className="w-4 h-4" />
-                              <span className="text-sm font-medium">Copy All</span>
+                            <span className="text-sm">Copy All</span>
                             </button>
                             <button
-                              onClick={() => handleShare(resources, 'Resources')}
-                              className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-indigo-600 border rounded-lg hover:border-indigo-600 transition-colors"
+                            onClick={() => handleShare(
+                              activeResultTab === 'transcription' ? response :
+                              activeResultTab === 'summary' ? summary :
+                              activeResultTab === 'keytakeaways' ? keyTakeaways :
+                              resources,
+                              activeResultTab
+                            )}
+                            className="flex items-center gap-2 px-3 py-1.5 text-gray-600 hover:text-indigo-600 border rounded hover:border-indigo-600 transition-colors"
                             >
                               <Share2 className="w-4 h-4" />
-                              <span className="text-sm font-medium">Share All</span>
+                            <span className="text-sm">Share All</span>
                             </button>
                           </div>
-                        )}
                       </div>
 
                       {/* Content with consistent styling */}
@@ -1681,6 +1921,7 @@ Transcription:`,
           </div>
         </div>
       </div>
+      <audio ref={audioRef} className="hidden" />
     </div>
   );
 };
